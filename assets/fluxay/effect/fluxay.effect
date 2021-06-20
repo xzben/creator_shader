@@ -1,0 +1,147 @@
+// Copyright (c) 2017-2020 Xiamen Yaji Software Co., Ltd.
+// 溶解的原理利用 discard 取消渲染的命令，按一定规律有序的将贴图取消渲染直至全部消失
+
+CCEffect %{
+  techniques:
+  - passes:
+    - vert: sprite-vs:vert
+      frag: sprite-fs:frag
+      depthStencilState:
+        depthTest: false
+        depthWrite: false
+      blendState:
+        targets:
+        - blend: true
+          blendSrc: src_alpha
+          blendDst: one_minus_src_alpha
+          blendDstAlpha: one_minus_src_alpha
+      rasterizerState:
+        cullMode: none
+      properties:
+        alphaThreshold: { value: 0.5 }
+}%
+
+CCProgram sprite-vs %{
+  precision highp float;
+  #include <cc-global>
+  #if USE_LOCAL
+    #include <cc-local>
+  #endif
+  #if SAMPLE_FROM_RT
+    #include <common>
+  #endif
+  in vec3 a_position;
+  in vec2 a_texCoord;
+  in vec4 a_color;
+
+  out vec4 color;
+  out vec2 uv0;
+
+  vec4 vert () {
+    vec4 pos = vec4(a_position, 1);
+
+    #if USE_LOCAL
+      pos = cc_matWorld * pos;
+    #endif
+
+    #if USE_PIXEL_ALIGNMENT
+      pos = cc_matView * pos;
+      pos.xyz = floor(pos.xyz);
+      pos = cc_matProj * pos;
+    #else
+      pos = cc_matViewProj * pos;
+    #endif
+
+    uv0 = a_texCoord;
+    #if SAMPLE_FROM_RT
+      CC_HANDLE_RT_SAMPLE_FLIP(uv0);
+    #endif
+    color = a_color;
+
+    return pos;
+  }
+}%
+
+CCProgram sprite-fs %{
+  precision highp float;
+  #include <embedded-alpha>
+  #include <cc-global>
+  #include <alpha-test>
+
+  in vec4 color;
+
+  #if USE_TEXTURE
+    in vec2 uv0;
+    #pragma builtin(local)
+    layout(set = 2, binding = 10) uniform sampler2D cc_spriteTexture;
+  #endif
+
+  vec4 shark_line( vec4 color ){
+    float width = 0.02;
+    float time = mod(cc_time.x, 1000.0);
+    float start = tan(cc_time.x/1.414);
+    float strength = 0.006;
+    float offset = 0.5;
+
+    if(uv0.x < (start - offset*uv0.y) && uv0.x > (start - offset*uv0.y - width))
+    {
+      vec3 improve = strength * vec3(255, 255, 255);
+      color.rgb = improve * color.rgb; 
+    }
+
+    return color;
+  }
+
+  #define TAU 6.120470874064187
+  #define MAX_ITER 5
+
+  vec4 shark_wave( vec4 color){
+    float time = mod(cc_time.x, 1000.0);
+    vec2 uv = uv0;
+
+    vec2 p = mod(uv*TAU, TAU) - 250.0;
+
+    vec2 i = vec2(p);
+    float c = 1.0;
+    float inten = 0.0045;
+
+    for (int n = 0; n < MAX_ITER; n++) 
+    {
+        float t =  time * (1.0 - (3.5 / float(n+1)));
+        i = p + vec2(cos(t - i.x) + sin(t + i.y), sin(t - i.y) + cos(1.5*t + i.x));
+        c += 1.0/length(vec2(p.x / (cos(i.x+t)/inten),p.y / (cos(i.y+t)/inten)));
+    }
+    c /= float(MAX_ITER);
+    c = 1.17-pow(c, 1.4);
+    vec4 tex = color;
+    vec3 colour = vec3(pow(abs(c), 20.0));
+    colour = clamp(colour + vec3(0.0, 0.0, .0), 0.0, tex.a);
+
+    // 混合波光
+    float alpha = c*tex[3];  
+    tex[0] = tex[0] + colour[0]*alpha; 
+    tex[1] = tex[1] + colour[1]*alpha; 
+    tex[2] = tex[2] + colour[2]*alpha; 
+    
+    return tex;
+  }
+
+  vec4 frag () {
+    vec4 o = vec4(1, 1, 1, 1);
+
+    #if USE_TEXTURE
+      o *= CCSampleWithAlphaSeparated(cc_spriteTexture, uv0);
+      o = shark_wave(o);
+      o = shark_line(o);
+
+      #if IS_GRAY
+        float gray  = 0.2126 * o.r + 0.7152 * o.g + 0.0722 * o.b;
+        o.r = o.g = o.b = gray;
+      #endif
+    #endif
+
+    o *= color;
+    ALPHA_TEST(o);
+    return o;
+  }
+}%
